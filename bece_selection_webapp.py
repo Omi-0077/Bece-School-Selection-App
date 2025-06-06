@@ -10,31 +10,29 @@ def load_school_data():
     df = pd.read_excel("FINAL 2025 SECOND CYCLE SCHOOLS REGISTER.xlsx", sheet_name=None)
     all_schools = pd.concat(df.values(), ignore_index=True)
     all_schools.dropna(subset=["SCHOOL CODE", "SCHOOL NAME"], inplace=True)
+    # Ensure SCHOOL CODE is string for consistency
+    all_schools["SCHOOL CODE"] = all_schools["SCHOOL CODE"].astype(str)
     return all_schools
 
 schools_df = load_school_data()
 
 # --- Helper Functions for School Filtering and Compliance ---
 def filter_by_guidelines(df, aggregate, gender, region_prefs, career, tvet_only=False, stem_only=False):
-    # 1. Filter by region(s), aggregate/cutoff, and gender
     filtered = df[
         (df["REGION"].isin(region_prefs)) &
         (df["GENDER"].str.contains(gender, case=False, na=False)) &
         (df["CUTOFF"].apply(lambda x: aggregate <= int(str(x).split("-")[1]) if pd.notna(x) and "-" in str(x) else True))
     ]
-    # 2. Optionally filter by TVET/STEM
     if tvet_only:
         filtered = filtered[filtered["CATEGORY"].isin(["A", "B", "C"])]
         filtered = filtered[filtered["SCHOOL TYPE"].str.contains("TVET|TECHNICAL", case=False, na=False)]
     if stem_only:
         filtered = filtered[filtered["PROGRAMMES OFFERED"].str.contains("SCIENCE|STEM", case=False, na=False)]
-    # 3. Optionally filter by career interest
     if career:
         filtered = filtered[filtered["PROGRAMMES OFFERED"].str.contains(career, case=False, na=False)]
     return filtered
 
 def validate_selections(main_choices, alt_choices):
-    # Ensure guideline compliance
     cats = main_choices["CATEGORY"].tolist()
     catA = cats.count("A")
     catB = cats.count("B")
@@ -42,7 +40,6 @@ def validate_selections(main_choices, alt_choices):
         return False, "Cannot select more than one Category A school."
     if catB > 2:
         return False, "Cannot select more than two Category B schools."
-    # Alt choices: must be from Appendix 3
     if not all("APPENDIX 3" in str(row) for row in alt_choices["REMARKS"].tolist()):
         return False, "Alternative schools must be from Appendix 3."
     return True, ""
@@ -74,29 +71,55 @@ if submit_btn:
     filtered_schools = filter_by_guidelines(
         schools_df, predicted_aggregate, gender, region_prefs, career, tvet_only, stem_only
     )
+
+    if filtered_schools.empty:
+        st.error("No schools match your criteria. Please adjust your preferences.")
+        st.stop()
+
+    # Prepare options for selection: show both name and code
+    filtered_schools["display_name"] = filtered_schools["SCHOOL NAME"] + " (" + filtered_schools["SCHOOL CODE"] + ")"
+    school_code_map = dict(zip(filtered_schools["display_name"], filtered_schools["SCHOOL CODE"]))
+
     # Main Choices
     st.subheader("Select Your 5 Main Schools (Order Matters)")
-    main_choices = st.dataframe(
+    st.dataframe(
         filtered_schools[["SCHOOL NAME", "SCHOOL CODE", "CATEGORY", "REGION", "BOARDING", "PROGRAMMES OFFERED", "CUTOFF"]].reset_index(drop=True),
         use_container_width=True,
         hide_index=True
     )
-    selected_main = st.multiselect(
-        "Pick 5 main schools by SCHOOL CODE (in order of preference):",
-        filtered_schools["SCHOOL CODE"], max_selections=5
+    main_options = filtered_schools["display_name"].tolist()
+    selected_main_display = st.multiselect(
+        "Pick 5 main schools (by name/code):",
+        main_options,
+        max_selections=5
     )
-    # Alt Choices
+    selected_main = [school_code_map[x] for x in selected_main_display]
+
+    # Alt Choices (Appendix 3 only)
     st.subheader("Select 2 Alternative Schools (Appendix 3 only)")
-    appendix3_schools = filtered_schools[filtered_schools["REMARKS"].str.contains("APPENDIX 3", na=False)]
-    alt_choices = st.dataframe(
+    appendix3_schools = filtered_schools[filtered_schools["REMARKS"].str.contains("APPENDIX 3", na=False)].copy()
+    appendix3_schools["display_name"] = appendix3_schools["SCHOOL NAME"] + " (" + appendix3_schools["SCHOOL CODE"] + ")"
+    appendix3_code_map = dict(zip(appendix3_schools["display_name"], appendix3_schools["SCHOOL CODE"]))
+
+    st.dataframe(
         appendix3_schools[["SCHOOL NAME", "SCHOOL CODE", "CATEGORY", "REGION", "BOARDING", "PROGRAMMES OFFERED", "CUTOFF"]].reset_index(drop=True),
         use_container_width=True,
         hide_index=True
     )
-    selected_alt = st.multiselect(
-        "Pick 2 alternative schools by SCHOOL CODE (Appendix 3):",
-        appendix3_schools["SCHOOL CODE"], max_selections=2
+    alt_options = appendix3_schools["display_name"].tolist()
+    selected_alt_display = st.multiselect(
+        "Pick 2 alternative schools (by name/code, Appendix 3):",
+        alt_options,
+        max_selections=2
     )
+    selected_alt = [appendix3_code_map[x] for x in selected_alt_display]
+
+    # Error checking for invalid codes (shouldn't happen, but just in case)
+    invalid_main = [code for code in selected_main if code not in filtered_schools["SCHOOL CODE"].values]
+    invalid_alt = [code for code in selected_alt if code not in appendix3_schools["SCHOOL CODE"].values]
+    if invalid_main or invalid_alt:
+        st.error("Invalid school code(s) selected. Please select from the list shown.")
+        st.stop()
 
     if st.button("Validate and Download Selection as PDF"):
         # Build chosen DataFrames
@@ -121,20 +144,21 @@ if submit_btn:
             pdf.cell(100, 10, f"Career Interest: {career}", ln=1)
             pdf.ln(5)
             for idx, row in main_df.iterrows():
-                pdf.multi_cell(0, 10, f"{idx+1}. {row['SCHOOL NAME']} | Code: {row['SCHOOL CODE']} | Category: {row['CATEGORY']} | Boarding: {row['BOARDING']} | Programs: {row['PROGRAMMES OFFERED']} | Cut-off: {row['CUTOFF']}", border=1)
+                pdf.multi_cell(0, 10, f"{idx+1}. {row['SCHOOL NAME']} | Code: {row['SCHOOL CODE']} | Category: {row['CATEGORY']} | Boarding: {row['BOARDING']} | Programs: {row['PROGRAMMES OFFERED']}")
             pdf.ln(3)
             pdf.set_font("Arial", "B", 12)
             pdf.cell(0, 10, "Alternative Schools (Appendix 3):", ln=1)
             pdf.set_font("Arial", "", 12)
-            for idx, row in alt_df.iterrows():
-                pdf.multi_cell(0, 10, f"{idx+6}. {row['SCHOOL NAME']} | Code: {row['SCHOOL CODE']} | Category: {row['CATEGORY']} | Boarding: {row['BOARDING']} | Programs: {row['PROGRAMMES OFFERED']} | Cut-off: {row['CUTOFF']}", border=1)
+            start_idx = len(main_df)
+            for idx, row in enumerate(alt_df.itertuples(), start=start_idx+1):
+                pdf.multi_cell(0, 10, f"{idx}. {row._2} | Code: {row._3} | Category: {row._4} | Boarding: {row._5} | Programs: {row._6}")
             pdf.ln(2)
             pdf.set_font("Arial", "I", 11)
             pdf.cell(0, 10, "Double-check your choices with a teacher or guardian. Best of luck!", ln=1)
             pdf_output = io.BytesIO()
             pdf.output(pdf_output)
             st.download_button(
-                label="📄 Download PDF Form",
+                label="ðŸ“„ Download PDF Form",
                 data=pdf_output.getvalue(),
                 file_name="BECE_School_Selection_2025.pdf"
             )
